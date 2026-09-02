@@ -82,7 +82,7 @@ C2ComponentAdapter::C2ComponentAdapter(std::shared_ptr<C2Component> comp) :
     mStore(), mCallbackLock(), mInPendingBuffer(), mOutPendingBuffer(),
     mTrackBuffers(), mLock(), mLockOut(), mPendingWorkCond()
 {
-    GST_LOG("Component(%p) created", this);
+    SG_INFO("C2ComponentAdapter(%p) created", this);
 
     mComp = std::move(comp);
     mIntf = nullptr;
@@ -105,7 +105,7 @@ C2ComponentAdapter::C2ComponentAdapter(std::shared_ptr<C2Component> comp) :
 
 C2ComponentAdapter::~C2ComponentAdapter()
 {
-    GST_LOG("Component(%p) destroyed", this);
+    SG_INFO("C2ComponentAdapter(%p) destroy", this);
 
     mInPendingBuffer.clear();
     mOutPendingBuffer.clear();
@@ -129,7 +129,7 @@ c2_status_t C2ComponentAdapter::setListenercallback(std::shared_ptr<EventCallbac
     c2_blocking_t mayBlock)
 {
 
-    GST_LOG("Component(%p) listener set", this);
+    SG_INFO("C2ComponentAdapter(%p) listener set", this);
 
     c2_status_t result = C2_NO_INIT;
 
@@ -539,17 +539,19 @@ void C2ComponentAdapter::onDestroyNotify(const C2Buffer* buf, void* arg)
 
 void C2ComponentAdapter::onBufferDestroyed(const C2Buffer* buf, void* arg)
 {
+    uint64_t frameIndex;
+    bool isReleaseInputBuf = false;
     std::unique_lock<std::mutex> ul(mLock);
 
     GST_LOG("%s mNumPendingWorks %d", __func__, mNumPendingWorks);
 
     TrackBuffer* trackbuf = (TrackBuffer*)arg;
     if (!mTrackBuffers.empty()) {
-
         auto buf = mTrackBuffers.find(trackbuf);
         if (buf != mTrackBuffers.end()) {
-            GST_LOG("erase buf idx:%zu TrackBuffer %p", trackbuf->frameIndex, trackbuf);
-            releaseInputBuf(trackbuf->frameIndex);
+            frameIndex = trackbuf->frameIndex;
+            GST_LOG("erase buf idx:%zu TrackBuffer %p", frameIndex, trackbuf);
+            isReleaseInputBuf = true;
             mTrackBuffers.erase(buf);
             delete trackbuf;
         }
@@ -560,6 +562,13 @@ void C2ComponentAdapter::onBufferDestroyed(const C2Buffer* buf, void* arg)
 
         mPendingSignaled = true;
         ul.unlock();
+
+        if (isReleaseInputBuf) {
+            GST_DEBUG("releaseInputBuf begin: mNumPendingWorks:%d bufIdx:%zu", mNumPendingWorks, frameIndex);
+            releaseInputBuf(frameIndex);
+            GST_DEBUG("releaseInputBuf done");
+        }
+
         mPendingWorkCond.notify_one();
     }
 }
