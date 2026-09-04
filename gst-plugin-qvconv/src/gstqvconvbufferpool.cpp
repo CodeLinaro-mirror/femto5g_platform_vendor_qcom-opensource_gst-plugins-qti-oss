@@ -56,7 +56,11 @@ bool gst_qvconv_alloc_c2d_buf (C2dConverter *c2d, C2DBuffer *c2d_buf, const GstV
 
   switch (gst_qvconv_get_format_from_info (info)) {
   case GST_MAKE_FOURCC ('N', 'V', '1', '2'):
-    c2d_buf->gbm_format = GBM_FORMAT_NV12;
+    if (GST_VIDEO_INFO_FORMAT (info) == GST_VIDEO_FORMAT_NV12_10LE32) {
+      c2d_buf->gbm_format = GBM_FORMAT_YCbCr_420_TP10_UBWC;
+    } else {
+      c2d_buf->gbm_format = GBM_FORMAT_NV12;
+    }
     if (ubwc_flags)
       c2d_buf->ubwc_flags = TRUE;
     break;
@@ -85,6 +89,19 @@ bool gst_qvconv_alloc_c2d_buf (C2dConverter *c2d, C2DBuffer *c2d_buf, const GstV
   c2d_buf->width = GST_VIDEO_INFO_WIDTH (info);
   c2d_buf->height = GST_VIDEO_INFO_HEIGHT (info);
   c2d_buf->size = GST_VIDEO_INFO_SIZE (info);
+
+  //Judge and revise height for TP10 ubwc special CTU32 case
+  if (GST_VIDEO_INFO_FORMAT (info) == GST_VIDEO_FORMAT_NV12_10LE32) {
+    gsize height_align16 = GST_ROUND_UP_N(GST_VIDEO_INFO_HEIGHT (info), 16);
+    gsize height_align32 = GST_ROUND_UP_N(GST_VIDEO_INFO_HEIGHT (info), 32);
+    gsize revise_size = VENUS_BUFFER_SIZE_USED(COLOR_FMT_NV12_BPP10_UBWC,
+                                      GST_VIDEO_INFO_WIDTH (info), height_align32, 0);
+
+    if (GST_VIDEO_INFO_SIZE (info) == revise_size && height_align16 != height_align32) {
+      //it's special CTU32 case
+      c2d_buf->height = height_align32;
+    }
+  }
 
   if (!c2d->allocateBuffer (c2d_buf)) {
     SG_ERR_LITE ("failed to allocate c2d buffer");

@@ -116,6 +116,12 @@ struct _GstQvconvPrivate
   gboolean do_deinterlace;
 
   gboolean do_inputcopy;
+  /* For some video compress stream, it use CTU32 instead of CTU16.
+   * If 1 <= height % 32 <=16, then, the pixel layout in frame isn't same as CTU16,
+   * need specific handling. If height % 32 > 16, then, the pixel layout in frame is
+   * same as CTU16, needn't specific handling.
+   */
+  gboolean is_input_ctu32_smallbias;
 };
 
 GType gst_qvconv_get_type (void);

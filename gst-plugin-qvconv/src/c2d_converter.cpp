@@ -471,6 +471,7 @@ bool C2dConverter::isYUVSurface(ColorConvertFormat format)
     case NV12_UBWC:
     case CbYCrY:
     case VENUS_P010:
+    case TP10_UBWC:
         return true;
     default:
         return false;
@@ -640,6 +641,8 @@ uint32_t C2dConverter::getC2DFormat(ColorConvertFormat format, bool isSource)
         return C2D_COLOR_FORMAT_888_RGB | C2D_FORMAT_SWAP_ENDIANNESS;
     case VENUS_P010:
         return C2D_COLOR_FORMAT_420_P010;
+    case TP10_UBWC:
+        return C2D_COLOR_FORMAT_420_TP10 | C2D_FORMAT_UBWC_COMPRESSED;
     default:
         SG_ERR_LITE ("c2d inst=%p: Format not supported, %d", this, format);
         return -1;
@@ -664,6 +667,11 @@ size_t C2dConverter::calcYSize(ColorConvertFormat format, size_t width, size_t h
         return (VENUS_Y_STRIDE(COLOR_FMT_P010, width) *
                VENUS_Y_SCANLINES(COLOR_FMT_P010, height));
     }
+    case TP10_UBWC:
+        return ALIGN( VENUS_Y_STRIDE(COLOR_FMT_NV12_BPP10_UBWC, width) *
+               VENUS_Y_SCANLINES(COLOR_FMT_NV12_BPP10_UBWC, height), ALIGN4K) +
+               ALIGN( VENUS_Y_META_STRIDE(COLOR_FMT_NV12_BPP10_UBWC, width) *
+               VENUS_Y_META_SCANLINES(COLOR_FMT_NV12_BPP10_UBWC, height), ALIGN4K);
     default:
         GST_DEBUG ("c2d inst=%p: Format %d is not needed to handle", this, format);
         return 0;
@@ -708,6 +716,9 @@ size_t C2dConverter::calcSize(ColorConvertFormat format, size_t width, size_t he
         break;
     case VENUS_P010:
         size = VENUS_BUFFER_SIZE(COLOR_FMT_P010, width, height);
+        break;
+    case TP10_UBWC:
+        size = VENUS_BUFFER_SIZE(COLOR_FMT_NV12_BPP10_UBWC, width, height);
         break;
     default:
         SG_ERR_LITE ("c2d inst=%p: Format not supported , %d", this, format);
@@ -1002,6 +1013,13 @@ bool C2dConverter::dumpSurface(int fd, bool source)
                     goto out;
                 }
                 base += stride;
+            }
+        } else if (TP10_UBWC == format) {
+            size_t size = (size_t)VENUS_BUFFER_SIZE_USED(COLOR_FMT_NV12_BPP10_UBWC, width, height, 0);
+            nbytes = write(fd, base, size);
+            if (nbytes != (ssize_t)size) {
+                ret = false;
+                goto out;
             }
         } else {
             SG_ERR_LITE ("c2d inst=%p: Not support dump format: %d", this, format);

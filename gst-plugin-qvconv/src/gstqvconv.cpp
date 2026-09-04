@@ -43,7 +43,7 @@ GST_DEBUG_CATEGORY (gst_qvconv_debug);
 
 /* the capabilities of input and output.*/
 #define GST_QVCONV_SRC_TEMPLATE_CAP	GST_VIDEO_CAPS_MAKE("{UYVY, NV12, RGBA, BGR, RGB, ARGB, P010_10LE}")
-#define GST_QVCONV_SINK_TEMPLATE_CAP	GST_VIDEO_CAPS_MAKE("{UYVY, NV12, RGBA, BGR, RGB, ARGB, P010_10LE}")
+#define GST_QVCONV_SINK_TEMPLATE_CAP	GST_VIDEO_CAPS_MAKE("{UYVY, NV12, RGBA, BGR, RGB, ARGB, P010_10LE, NV12_10LE32}")
 
 static GstStaticPadTemplate gst_qvconv_src_template = GST_STATIC_PAD_TEMPLATE ("src",
     GST_PAD_SRC,
@@ -87,7 +87,8 @@ static GstFlowReturn
 gst_qvconv_transform (GstBaseTransform * trans, GstBuffer * inbuf,
     GstBuffer * outbuf);
 static gboolean
-gst_qvconv_align_info (GstQvconv * qvconv, GstVideoInfo * info, const GstVideoMeta * meta, gboolean isubwc);
+gst_qvconv_align_info (GstQvconv * qvconv, GstVideoInfo * info, const GstVideoMeta * meta,
+    gboolean isubwc, gboolean is_ctu32_smallbias);
 static gboolean
 gst_qvconv_match_color_type (const GstQvconv *qvconv, GstVideoFormat format,
     ColorConvertFormat *c2d_format, gboolean ubwc);
@@ -446,6 +447,7 @@ gst_qvconv_init (GstQvconv *qvconv)
   priv->do_deinterlace = FALSE;
 
   priv->do_inputcopy = QVCONV_INPUTCOPY_DEFAULT;
+  priv->is_input_ctu32_smallbias = FALSE;
 }
 
 static void
@@ -749,6 +751,10 @@ static gboolean gst_qvconv_configure_c2d (GstQvconv * qvconv)
   src.width  = GST_VIDEO_INFO_WIDTH (src_info);
   src.height = GST_VIDEO_INFO_HEIGHT (src_info);
   src.stride = GST_VIDEO_INFO_PLANE_STRIDE (src_info, 0);
+  //Revise height for TP10
+  if (src_format == GST_VIDEO_FORMAT_NV12_10LE32 && priv->is_input_ctu32_smallbias) {
+    src.height = GST_ROUND_UP_N(src.height, 32);
+  }
 
   dst_format = GST_VIDEO_INFO_FORMAT (dst_info);
   dst.width  = GST_VIDEO_INFO_WIDTH (dst_info);
@@ -833,7 +839,17 @@ static gboolean gst_qvconv_configure_c2d (GstQvconv * qvconv)
   if (flip && !c2d->setFlip(flip))
     SG_ERR_OBJ_LITE (qvconv, "c2d setFlip error, inst %p", qvconv);
 
-  c2d->setSrcCrop(priv->crop.x, priv->crop.y, priv->crop.width, priv->crop.height);
+  if (src_format == GST_VIDEO_FORMAT_NV12_10LE32 && priv->is_input_ctu32_smallbias) {
+    if (!(priv->crop.x | priv->crop.y | priv->crop.width | priv->crop.height)) {
+      SG_INFO_OBJ_LITE (qvconv, "need to crop(%d x %d) in (%d x %d) for TP10 format ctu32 case automatically",
+          GST_VIDEO_INFO_WIDTH (src_info), GST_VIDEO_INFO_HEIGHT (src_info), src.width, src.height);
+      c2d->setSrcCrop(0, 0, GST_VIDEO_INFO_WIDTH (src_info), GST_VIDEO_INFO_HEIGHT (src_info));
+    } else {
+      c2d->setSrcCrop(priv->crop.x, priv->crop.y, priv->crop.width, priv->crop.height);
+    }
+  } else {
+    c2d->setSrcCrop(priv->crop.x, priv->crop.y, priv->crop.width, priv->crop.height);
+  }
 
   priv->active = TRUE;
 
@@ -1207,7 +1223,8 @@ gst_qvconv_stop (GstBaseTransform * trans)
 
 /*the info refer to input or output of c2d, not plugin's input*/
 static gboolean
-gst_qvconv_align_info (GstQvconv * qvconv, GstVideoInfo * info, const GstVideoMeta * meta, gboolean isubwc)
+gst_qvconv_align_info (GstQvconv * qvconv, GstVideoInfo * info, const GstVideoMeta * meta,
+    gboolean isubwc, gboolean is_ctu32_smallbias)
 {
   GstVideoFormat format;
   gint width, height, stride0, stride1;
@@ -1392,7 +1409,48 @@ gst_qvconv_align_info (GstQvconv * qvconv, GstVideoInfo * info, const GstVideoMe
         SG_INFO_OBJ_LITE (qvconv, "P010 stride0=%d,offset1=%lu,size=%lu",
             GST_VIDEO_INFO_PLANE_STRIDE (info, 0),
             GST_VIDEO_INFO_PLANE_OFFSET (info, 1), GST_VIDEO_INFO_SIZE (info));
-    break;
+      break;
+    case GST_VIDEO_FORMAT_NV12_10LE32:
+      if (isubwc) {
+        GstQvconvPrivate *priv = qvconv->priv;
+        if (is_ctu32_smallbias) {
+          gsize height_align32 = GST_ROUND_UP_N(height, 32);
+          GST_VIDEO_INFO_SIZE (info) = VENUS_BUFFER_SIZE_USED(COLOR_FMT_NV12_BPP10_UBWC,
+                                           width, height_align32, 0);
+        } else {
+          GST_VIDEO_INFO_SIZE (info) = VENUS_BUFFER_SIZE_USED(COLOR_FMT_NV12_BPP10_UBWC, width,
+                                           height, 0);
+        }
+
+        if (!meta) {
+          gint stride_w, stride_h;
+          gint stride_w_ymeta, stride_h_ymeta, plane_sz_ymeta, plane_sz_y;
+
+          stride_w = VENUS_Y_STRIDE(COLOR_FMT_NV12_BPP10_UBWC, width);
+          stride_h = VENUS_Y_SCANLINES(COLOR_FMT_NV12_BPP10_UBWC, height);
+          GST_VIDEO_INFO_PLANE_STRIDE(info, 0) = stride_w;
+          GST_VIDEO_INFO_PLANE_STRIDE(info, 1) = stride_w;
+          stride_w_ymeta = VENUS_Y_META_STRIDE(COLOR_FMT_NV12_BPP10_UBWC, width);
+          stride_h_ymeta = VENUS_Y_META_SCANLINES(COLOR_FMT_NV12_BPP10_UBWC, height);
+          plane_sz_ymeta = GST_ROUND_UP_N(stride_w_ymeta * stride_h_ymeta, 4096);
+          plane_sz_y = GST_ROUND_UP_N(stride_w * stride_h, 4096);
+          GST_VIDEO_INFO_PLANE_OFFSET (info, 1) = plane_sz_ymeta + plane_sz_y;
+          SG_INFO_OBJ_LITE (qvconv, "TP10 ubwc stride_w=%d,stride_h=%d,offset[1]=%d",
+              stride_w, stride_h, GST_VIDEO_INFO_PLANE_OFFSET (info, 1));
+        } else {
+          /* Use stride0, stride1 and offset1 from meta. */
+          GST_VIDEO_INFO_PLANE_STRIDE (info, 0) = stride0;
+          GST_VIDEO_INFO_PLANE_STRIDE (info, 1) = stride1;
+          GST_VIDEO_INFO_PLANE_OFFSET (info, 1) = offset1;
+        }
+        SG_INFO_OBJ_LITE (qvconv, "TP10 ubwc stride0=%d,offset1=%lu,size=%lu",
+            GST_VIDEO_INFO_PLANE_STRIDE (info, 0),
+            GST_VIDEO_INFO_PLANE_OFFSET (info, 1), GST_VIDEO_INFO_SIZE (info));
+      } else {
+          SG_ERR_OBJ_LITE (qvconv, "Don't support TP10 linear");
+          return FALSE;
+      }
+      break;
     default:
       SG_ERR_OBJ_LITE (qvconv, "unsupport format when calculate gst video info layout %d(%s), inst %p", format, GST_VIDEO_INFO_NAME(info), qvconv);
       return FALSE;
@@ -1435,6 +1493,9 @@ gst_qvconv_match_color_type (const GstQvconv *qvconv, GstVideoFormat format,
         break;
     case GST_VIDEO_FORMAT_P010_10LE:
         *c2d_format = VENUS_P010;
+        break;
+    case GST_VIDEO_FORMAT_NV12_10LE32:
+        *c2d_format = TP10_UBWC;
         break;
     default:
         SG_ERR_OBJ_LITE (qvconv, "cannot find match c2d color type \
@@ -1531,6 +1592,11 @@ gst_qvconv_do_buffer_copy (GstBaseTransform * trans, C2DBuffer * c2d_input_buffe
             input_ptr + plugin_in_offset + h * plugin_in_stride,
             width<<1);
         }
+      break;
+    case GST_VIDEO_FORMAT_NV12_10LE32:
+      if (ubwc) {
+        memcpy((guint8 *)c2d_input_buffer->ptr, input_ptr, GST_VIDEO_INFO_SIZE(src_info));
+      }
       break;
     default:
       SG_ERR_OBJ_LITE (qvconv, "unsupport format %s when copy plugin's input gst buf to c2d input buf, inst %p",
@@ -1670,11 +1736,18 @@ gst_qvconv_set_info (GstVideoFilter * filter, GstCaps * incaps,
     priv->outubwc = TRUE;
   }
 
-  /* get alignment require for c2d */
-  if (!gst_qvconv_align_info (qvconv, in_info, NULL, priv->input_buffer.ubwc_flags))
+  /* Get alignment require for c2d.
+   * During gst_qvconv_set_info(), first input buffer hasn't come, therefore,
+   * priv->is_input_ctu32_smallbias is 0, unless this is not first time to
+   * execute gst_qvconv_set_info()
+   */
+  if (!gst_qvconv_align_info (qvconv, in_info, NULL, priv->input_buffer.ubwc_flags,
+      priv->is_input_ctu32_smallbias)) {
     return FALSE;
-  if (!gst_qvconv_align_info (qvconv, out_info, NULL, priv->outubwc))
+  }
+  if (!gst_qvconv_align_info (qvconv, out_info, NULL, priv->outubwc, 0)) {
     return FALSE;
+  }
 
   qvconv->src_info = *in_info;
   qvconv->dst_info = *out_info;
@@ -1746,17 +1819,39 @@ gst_qvconv_do_convert (GstBaseTransform * trans, GstBuffer * inbuf,
   if (!priv->active) {
     SG_INFO_OBJ (qvconv, "first buffer(%p) comes, configure c2d inst=%p, meta=%p, instance %"
         GST_PTR_FORMAT "@%p, input need copy %d, in_mem %p, force inputcopy %d, PTS: %" GST_TIME_FORMAT, inbuf, c2d, QGVMeta, qvconv, qvconv, (int)need_copy, in_mem, (int)priv->do_inputcopy, GST_TIME_ARGS(GST_BUFFER_PTS(inbuf)));
+
+    //For TP10 UBWC format, need to judge input buffer is CTU16 or CTU32
+    if (GST_VIDEO_FORMAT_NV12_10LE32 == GST_VIDEO_INFO_FORMAT (src_info)) {
+      gint width   = GST_VIDEO_INFO_WIDTH (src_info);
+      gint height  = GST_VIDEO_INFO_HEIGHT (src_info);
+      gsize gst_buf_size = gst_buffer_get_size(inbuf);
+      gsize input_buf_size_ctu32 = VENUS_BUFFER_SIZE_USED(COLOR_FMT_NV12_BPP10_UBWC, width,
+                                 GST_ROUND_UP_N(height, 32), 0);
+      if (input_buf_size_ctu32 == gst_buf_size &&
+             (GST_ROUND_UP_N(height, 32) != GST_ROUND_UP_N(height, 16) )) {
+        SG_INFO_OBJ (qvconv, "input data is specific CTU32, incompatible with CTU16, width %d, height %d, size %d",
+            width, height, (int)gst_buf_size);
+        priv->is_input_ctu32_smallbias = true;
+      } else {
+        priv->is_input_ctu32_smallbias = false;
+      }
+    }
     /* GstVideoMeta overrides GstVideoInfo for v4l2src->qvconv case.
      * v4l2src gets stride from QC camera driver, and stride can be configured
      * as no padding or as GBM-aligned with padding.
      * For copy case, upstream plugin pushed memory and meta are only for SW,
      * those stride&alignment probably are not suitable for c2d HW input buffer.
-     * Then, needn't update src_info for copy case.*/
-    if (QGVMeta && !need_copy)
-      if (!gst_qvconv_align_info (qvconv, src_info, QGVMeta, priv->input_buffer.ubwc_flags)) {
+     * Then, needn't update src_info for copy case.
+     * For TP10 ubwc format, since just get is_input_ctu32_smallbias result,
+     * always need update src_info.
+     */
+    if ((QGVMeta && !need_copy) || GST_VIDEO_INFO_FORMAT (src_info) == GST_VIDEO_FORMAT_NV12_10LE32) {
+      if (!gst_qvconv_align_info (qvconv, src_info, QGVMeta, priv->input_buffer.ubwc_flags,
+          priv->is_input_ctu32_smallbias)) {
         SG_ERR_OBJ_LITE (qvconv, "align src info and meta error, inst %p", qvconv);
         goto exit;
       }
+    }
 
     if (need_copy)
       priv->input_buf_internal = TRUE;
