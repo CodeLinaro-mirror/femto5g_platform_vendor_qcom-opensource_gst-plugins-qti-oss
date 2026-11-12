@@ -1010,6 +1010,7 @@ gst_qcodec2_vdec_set_format (GstVideoDecoder * decoder,
 
 done:
   dec->comp_started = TRUE;
+  SG_INFO_OBJ (dec, "set_format: comp started");
   return TRUE;
 
   /* Errors */
@@ -1100,6 +1101,7 @@ gst_qcodec2_vdec_stop (GstVideoDecoder * decoder)
     clear_external_buf_hash_table (decoder);
   }
 
+  SG_INFO_OBJ (dec, "stop: comp stopped");
   return TRUE;
 }
 

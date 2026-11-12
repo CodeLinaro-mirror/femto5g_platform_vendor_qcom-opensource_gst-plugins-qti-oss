@@ -1343,6 +1343,7 @@ gst_qcodec2_venc_stop (GstVideoEncoder * encoder)
     c2component_stop (enc->comp);
   }
 
+  SG_INFO_OBJ (enc, "stop: comp stopped");
   return TRUE;
 }
 
@@ -1819,10 +1820,9 @@ gst_qcodec2_venc_set_format (GstVideoEncoder * encoder,
     goto error_config;
   }
 
-  GST_DEBUG_OBJECT (enc, "c2 component started");
-
 done:
   enc->input_setup = TRUE;
+  SG_INFO_OBJ (enc, "set_format: comp started");
   return TRUE;
 
   /* Errors */
